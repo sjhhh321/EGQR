@@ -1,6 +1,36 @@
 import random
 from mutator.pattern_transformer import PatternTransformer
 import copy
+from itertools import combinations, product
+
+
+def _partition_mask(partition, edge_count):
+    """Encode same-chain edge pairs using the original ASG edge IDs."""
+    mask = 0
+    for chain in partition:
+        for i, j in combinations(sorted(chain), 2):
+            bit = i * (2 * edge_count - i - 1) // 2 + j - i - 1
+            mask |= 1 << bit
+    return mask
+
+
+def _select_diverse(candidates, base_mask, limit):
+    """Greedy max-min selection, with the base query always in the reference set."""
+    # All distances share sum(comb(m, 2)) across MATCH clauses, so Hamming
+    # counts give exactly the same ranking as normalized distances, even when
+    # there are no edge pairs. Strict ties retain candidate input order.
+    scores = [(mask ^ base_mask).bit_count() for _, mask in candidates]
+    selected = []
+    for _ in range(min(max(0, limit), len(candidates))):
+        best = max(range(len(candidates)), key=scores.__getitem__)
+        query, mask = candidates[best]
+        selected.append(query)
+        scores[best] = -1
+        for i, (_, other_mask) in enumerate(candidates):
+            if scores[i] >= 0:
+                scores[i] = min(scores[i], (mask ^ other_mask).bit_count())
+    return selected
+
 
 class QueryTransformer():
     def __parse_patterns(self, query):
@@ -69,45 +99,41 @@ class QueryTransformer():
         return new_query
         
     def EGE(self, query, threshold, transform_times):
+        """Generate EGE candidates and return up to transform_times in max-min order."""
+        if transform_times <= 0:
+            return []
         patterns = sorted(self.__parse_patterns(query))
-        
         new_patterns_list = []
-        rewrite_query_list = []
+        base_mask, offset = 0, 0
         for pos in patterns:
             pattern = query[pos[0]:pos[1]]
             P = PatternTransformer()
-            asg = P.pattern2asg(pattern)
+            asg, base_partition = P.pattern2asg(pattern, with_partition=True)
+            base_mask |= _partition_mask(base_partition, asg.M) << offset
             new_patterns = []
             if asg.M >= threshold:
                 for i in range(transform_times):
                     asg_copy = copy.deepcopy(asg)
-                    new_patterns.append(P.asg2pattern(asg_copy))
+                    new_patterns.append(P.asg2pattern(asg_copy, with_partition=True))
             else:
-                new_patterns = P.asg2pattern_with_enum(asg)
-            new_patterns_list.append(new_patterns)
+                new_patterns = P.asg2pattern_with_enum(asg, with_partition=True)
+            new_patterns_list.append([
+                (text, _partition_mask(partition, asg.M) << offset)
+                for text, partition in new_patterns
+            ])
+            # Separate bit ranges keep edge IDs local to their original MATCH.
+            offset += asg.M * (asg.M - 1) // 2
 
-        
-        def dfs(new_query, old_query, index, cnt, patterns, patterns_list):
-            
-            if cnt == len(patterns):
-                while index < len(old_query):
-                    new_query = new_query + old_query[index]
-                    index = index + 1
-                rewrite_query_list.append(new_query)
-                return
-            
-            pos = patterns[cnt]
-            while index < pos[0]:
-                new_query = new_query + old_query[index]
-                index = index + 1
-            new_patterns = patterns_list[cnt]
-            for i in range(len(new_patterns)):
-                new_pattern = new_patterns[i]
-                dfs(new_query + new_pattern + " ", old_query, pos[1], cnt + 1, patterns, patterns_list)
-            
-        
-        dfs("", query, 0, 0, patterns, new_patterns_list)
-        return rewrite_query_list
+        candidates = []
+        for choice in product(*new_patterns_list):
+            parts, index, mask = [], 0, 0
+            for (start, end), (text, pattern_mask) in zip(patterns, choice):
+                parts.extend((query[index:start], text, " "))
+                index = end
+                mask |= pattern_mask
+            parts.append(query[index:])
+            candidates.append(("".join(parts), mask))
+        return _select_diverse(candidates, base_mask, transform_times)
         
 
 

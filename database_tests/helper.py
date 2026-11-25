@@ -7,9 +7,6 @@ from tinydb import TinyDB, Query
 from logging import Logger
 from gdb_clients import GdbFactory
 from mutator.query_transformer import QueryTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer, util
-from sklearn.cluster import KMeans
 from webhook.lark import post
 from abc import ABC, abstractmethod
 from typing import Callable,List
@@ -21,57 +18,6 @@ import json
 import random
 
 
-def diversify_queries_auto(queries, model):
-    
-    embeddings = model.encode(queries, convert_to_tensor=True)
-
-    n = len(queries)
-
-    
-    if n <= 50:
-        selected_indices = [0]
-        remaining_indices = set(range(1, n))
-
-        while remaining_indices:
-            last_idx = selected_indices[-1]
-            max_dist = -1
-            next_idx = None
-
-            for idx in remaining_indices:
-                sim = util.pytorch_cos_sim(embeddings[last_idx], embeddings[idx]).item()
-                dist = 1 - sim
-                if dist > max_dist:
-                    max_dist = dist
-                    next_idx = idx
-
-            selected_indices.append(next_idx)
-            remaining_indices.remove(next_idx)
-
-        return [queries[i] for i in selected_indices]
-
-    
-    else:
-        embeddings_np = embeddings.cpu().numpy()
-        num_clusters = max(10, int(n ** 0.5))
-        kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init='auto')
-        labels = kmeans.fit_predict(embeddings_np)
-
-        
-        cluster_to_queries = {i: [] for i in range(num_clusters)}
-        for query, label in zip(queries, labels):
-            cluster_to_queries[label].append(query)
-
-        for qlist in cluster_to_queries.values():
-            random.shuffle(qlist)
-
-        diversified = []
-        while any(cluster_to_queries.values()):
-            for i in range(num_clusters):
-                if cluster_to_queries[i]:
-                    diversified.append(cluster_to_queries[i].pop())
-
-        return diversified
-    
 class MaxHeap:
     def __init__(self, db_path, max_size):
         self.db = TinyDB(db_path)
@@ -167,7 +113,6 @@ def general_testing_procedure(conf: TestConfig):
     ex_time = 1
     
     query_analyze = QueryAnalyze(conf.source_file, conf.algorithm,conf.database_name)
-    model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
     for query in match_statements:
         try:
             if isinstance(query, dict):
@@ -188,11 +133,8 @@ def general_testing_procedure(conf: TestConfig):
                 query_analyze.add_query(query)
                 query_analyze.add_query_plan(query_plan1)
                 new_query_list = conf.EGE(query, conf.threshold, conf.transform_times)
-                new_query_list = diversify_queries_auto(new_query_list, model)
-                #random.shuffle(new_query_list)
 
-                for i in range(min(conf.transform_times, len(new_query_list))):
-                    new_query = new_query_list[i % len(new_query_list)]
+                for new_query in new_query_list[:conf.transform_times]:
                     result2 = None
                     query_plan2 = None
                     if dbType == "neo4j":

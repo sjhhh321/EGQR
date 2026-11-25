@@ -31,8 +31,9 @@ class PatternTransformer(AbstractASGOperator):
         return res
 
     def __pattern2list(self, pattern):
-        patterns, result, isolated_nodes = pattern.split(","), [], []
+        patterns, result, isolated_nodes, partition = pattern.split(","), [], [], []
         for pattern in patterns:
+            first_edge = len(result)
             pattern = pattern.strip(" ")
             pattern = pattern.strip("\n")
             v1, r, v2 = "", "", ""
@@ -50,9 +51,11 @@ class PatternTransformer(AbstractASGOperator):
                     r = r + pattern[i]
             if edge_counter == 0 and len(v1) > 0:
                 isolated_nodes.append(v1)
+            if edge_counter:
+                partition.append(tuple(range(first_edge, len(result))))
         # logger.debug(result)
         # logger.debug(isolated_nodes)
-        return result, isolated_nodes
+        return result, isolated_nodes, partition
 
     def __pattern2node(self, pattern):
         pattern = pattern.strip(" ").strip(")").strip("(")
@@ -64,10 +67,10 @@ class PatternTransformer(AbstractASGOperator):
         result["labels"] = labels
         return result
 
-    def pattern2asg(self, pattern: str):
+    def pattern2asg(self, pattern: str, with_partition=False):
         G = ASG()
         Node2Labels, Node2Id, Id_index = dict(), dict(), 0
-        patterns, isolated_nodes = self.__pattern2list(pattern)
+        patterns, isolated_nodes, partition = self.__pattern2list(pattern)
         for edge in patterns:
             v1, v2 = edge[0], edge[2]
             r1, r2 = self.__pattern2node(v1), self.__pattern2node(v2)
@@ -106,13 +109,13 @@ class PatternTransformer(AbstractASGOperator):
             r1, r2 = self.__pattern2node(v1), self.__pattern2node(v2)
             G.AddEdge(Node2Id[r1["name"]], Node2Id[r2["name"]], edge[1])
 
-        return G
+        return (G, partition) if with_partition else G
     def pattern2asgforllm(self, pattern: str):
         
         original_path = ""
         G = ASG()
         Node2Labels, Node2Id, Id_index = dict(), dict(), 0
-        patterns, isolated_nodes = self.__pattern2list(pattern)
+        patterns, isolated_nodes, _ = self.__pattern2list(pattern)
         for i in range(len(patterns)):
             edge = patterns[i]
             v1, v2 = edge[0], edge[2]
@@ -270,18 +273,23 @@ class PatternTransformer(AbstractASGOperator):
         
         return result
 
-    def asg2pattern(self, asg: ASG):
+    def asg2pattern(self, asg: ASG, with_partition=False):
         result = []
+        partition = []
         while len(asg.DeletedEdge) < asg.M or len(asg.DeletedNode) < asg.N:
             Availiable_Nodes = list()
             for i in range(0, asg.N):
                 if i not in asg.DeletedNode:
                     Availiable_Nodes.append(i)
             start_id = random.choice(Availiable_Nodes)
+            previous_edges = asg.DeletedEdge.copy()
             result.append(self.__traversal(asg, start_id, 0))
+            chain = asg.DeletedEdge - previous_edges
+            if chain:
+                partition.append(tuple(sorted(chain)))
         result = ", ".join(result)
         # logger.debug(result)
-        return result
+        return (result, partition) if with_partition else result
     
     def get_partitions(self, collection):
         if not collection:
@@ -388,7 +396,7 @@ class PatternTransformer(AbstractASGOperator):
         return path[::-1] 
 
         
-    def asg2pattern_with_enum(self, asg:ASG):
+    def asg2pattern_with_enum(self, asg:ASG, with_partition=False):
         
         results = []
         collection = self.get_edges(asg)
@@ -458,8 +466,7 @@ class PatternTransformer(AbstractASGOperator):
             
             
             pattern = pattern.strip(",")
-            results.append(pattern)
+            edge_partition = [tuple(edge[2] for edge in group) for group in partition]
+            results.append((pattern, edge_partition) if with_partition else pattern)
         
         return results
-
-    
